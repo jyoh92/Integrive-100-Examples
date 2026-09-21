@@ -1,0 +1,35 @@
+--- boards/neptunesdr/src/ipshared/c40a/openofdm_rx/openofdm_rx.srcs/sources_1/imports/verilog/dot11.v	2026-09-06 20:19:36.000000000 +0900
++++ /tmp/span/dot11.v	2026-09-16 09:29:16.157516265 +0900
+@@ -27,6 +27,18 @@
+     parameter integer SHARED_FFT_MODE           = 0
+ )
+ (
++    // ---- Chuong 6A: bus dieu khien span (mot span hoat dong moi luc) ----
++    //   [0] en   [1] ptr_rst   [2] go   [3] wr_tog
++    //   [6:4]   bnd      ranh gioi VAO (noi chen).  5 = B5.
++    //   [31:16] len      so phan tu can phat
++    //   [63:32] wr_data  du lieu ghi (bien byte dung [39:32])
++    input  wire [63:0] ps_ctl,
++    output wire        b4_valid_o,
++    output wire [7:0]  b4_byte_o,
++    output wire        b3_valid_o,
++    output wire [7:0]  b3_byte_o,
++    output wire        b2_valid_o,
++    output wire [7:0]  b2_byte_o,
+     input clock,
+     input enable,
+     input reset,
+@@ -224,6 +236,13 @@
+         .NUM_OFDM_SYMBOLS(NUM_OFDM_SYMBOLS),
+         .SHARED_FFT_MODE(SHARED_FFT_MODE)
+     ) u_sipddm_rx (
++        .ps_ctl                 (ps_ctl),
++        .b4_valid_o             (b4_valid_o),
++        .b4_byte_o              (b4_byte_o),
++        .b3_valid_o             (b3_valid_o),
++        .b3_byte_o              (b3_byte_o),
++        .b2_valid_o             (b2_valid_o),
++        .b2_byte_o              (b2_byte_o),
+         .fft_win_shift          (fft_win_shift),
+         .fft_sat_en             (fft_sat_en),
+         .clk                    (clock),

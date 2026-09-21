@@ -1,0 +1,84 @@
+--- boards/neptunesdr/src/ipshared/c40a/verilog/openofdm_rx.v	2026-09-08 09:01:56.258199555 +0900
++++ /tmp/span/openofdm_rx.v	2026-09-16 09:29:16.157702205 +0900
+@@ -372,6 +372,19 @@
+ // (byte ma, roi bitmap) vi duong byte_out chi co mot lan.
+ wire       b5_mode = slv_reg5[16];
+ wire       er_mode = slv_reg5[17];
++// slv_reg5[18] = 1 -> phat ban sao luong B4 (mau da can bang, 2 byte moi song
++// mang: I roi Q).  Day la nua BAT cua span (B4,B5): PS doc o day, giai dieu
++// che tren ARM, roi ghi nguoc vao qua ps_ctl de chen o B5.
++wire       b4_mode = slv_reg5[18];
++// [19] = phat ban sao luong B3 (song mang da tach bin, 4 byte moi song mang:
++// I cao, I thap, Q cao, Q thap).  Nua BAT cua span (B3,B4).
++wire       b3_mode = slv_reg5[19];
++wire       b4_valid; wire [7:0] b4_byte;
++wire       b3_valid; wire [7:0] b3_byte;
++// [20] = phat ban sao luong B2 (mau da can chinh CFO, con tien to vong;
++// 4 byte moi mau).  Nua BAT cua span (B2,B3).
++wire       b2_mode = slv_reg5[20];
++wire       b2_valid; wire [7:0] b2_byte;
+ 
+ // ================ CHUONG 6A: DUNG-CHO + DUONG TRA VE O B6 ==================
+ // Muc 6A.6 doi: "The data plane stalls at the exit boundary until the PS
+@@ -397,7 +410,26 @@
+ //   la duong van chuyen byte toi rx_intf.  Bo dem/cо cua dot11 (byte_count,
+ //   fcs_out_strobe) van phan anh duong PL -- chung nam TRONG dot11, khong phai
+ //   sau B6.
+-wire        ps_span_en = slv_reg6[0];
++// ★ Chuong 6A tong quat: mot bus dieu khien, mot chi so ranh gioi.
++//   Co che CU chen o dau ra cua dot11, tuc ranh gioi B6.  Co che MOI (ps_inject
++//   trong v39ct_mm_decode) chen o B5.  Ca hai deu doc slv_reg6[0], nen phai
++//   tach bang chi so, neu khong bat mot cai la bat ca hai.
++//
++//   slv_reg6[6:4] = ranh gioi VAO (noi chen).  0 hoac 6 = B6 (co che cu, giu
++//   nguyen cho phan mem da co); 5 = B5 (co che moi).
++wire [2:0]  ps_bnd     = slv_reg6[6:4];
++wire        ps_span_en = slv_reg6[0] & ((ps_bnd == 3'd6) | (ps_bnd == 3'd0));
++
++// Bus xuong duoi: dot11 -> phy -> chest_top -> mm_decode.
++//   [0] en  [1] ptr_rst  [2] go  [3] wr_tog  [6:4] bnd  [31:16] len  [63:32] data
++//   Bien byte dung [39:32]; bien mau phuc (B2/B3/B4) se dung ca [63:32] tu
++//   slv_reg8 khi duoc noi vao.
++wire [63:0] ps_ctl = { 24'd0, slv_reg7[7:0],          // [63:32] du lieu ghi
++                       slv_reg6[31:16],               // [31:16] len
++                       9'd0,                          // [15:7]  chua dung
++                       ps_bnd,                        // [6:4]   ranh gioi
++                       slv_reg7[8],                   // [3]     wr_tog
++                       slv_reg6[2:0] };               // [2:0]   go/ptr_rst/en
+ wire        ps_ptr_rst = slv_reg6[1];
+ wire        ps_go      = slv_reg6[2];
+ wire [15:0] ps_len     = slv_reg6[31:16];
+@@ -439,11 +471,17 @@
+   end
+ end
+ 
+-assign byte_out_strobe = er_mode    ? b5_er_valid
++assign byte_out_strobe = b2_mode    ? b2_valid
++                       : b3_mode    ? b3_valid
++                       : b4_mode    ? b4_valid
++                       : er_mode    ? b5_er_valid
+                        : b5_mode    ? b5_valid
+                        : ps_span_en ? ps_v
+                        :              dot11_byte_strobe;
+-assign byte_out        = er_mode    ? b5_er_byte
++assign byte_out        = b2_mode    ? b2_byte
++                       : b3_mode    ? b3_byte
++                       : b4_mode    ? b4_byte
++                       : er_mode    ? b5_er_byte
+                        : b5_mode    ? b5_byte
+                        : ps_span_en ? ps_b
+                        :              dot11_byte;
+@@ -451,6 +489,13 @@
+ dot11 # (
+   .SHARED_FFT_MODE(SHARED_FFT_MODE)
+ ) dot11_i (
++  .ps_ctl(ps_ctl),
++  .b4_valid_o(b4_valid),
++  .b4_byte_o(b4_byte),
++  .b3_valid_o(b3_valid),
++  .b3_byte_o(b3_byte),
++  .b2_valid_o(b2_valid),
++  .b2_byte_o(b2_byte),
+   .clock(s00_axi_aclk),
+   .enable( 1 ),
+   //.reset ( (~s00_axi_aresetn)|slv_reg0[0]|openofdm_core_rst ),

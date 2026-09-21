@@ -1,0 +1,344 @@
+--- boards/neptunesdr/src/ipshared/c40a/openofdm_rx/openofdm_rx.srcs/sources_1/imports/verilog/openwifi_rx_phy.v	2026-09-06 22:34:33.000000000 +0900
++++ /tmp/span/phy.v	2026-09-16 09:40:28.665638369 +0900
+@@ -44,6 +44,22 @@
+     parameter integer SHARED_FFT_MODE         = 0
+ )
+ (
++    // ---- Chuong 6A: bus dieu khien span (mot span hoat dong moi luc) ----
++    //   [0] en   [1] ptr_rst   [2] go   [3] wr_tog
++    //   [6:4]   bnd      ranh gioi VAO (noi chen).  5 = B5.
++    //   [31:16] len      so phan tu can phat
++    //   [63:32] wr_data  du lieu ghi (bien byte dung [39:32])
++    input  wire [63:0] ps_ctl,
++    // ---- Chuong 6A: ban sao luong B4 (mau da can bang) cho PS doc ----
++    //   Moi song mang = 2 byte: I truoc, Q sau.  Dac ta PHY 3.3 goi B4 la mau
++    //   phuc; trong thiet ke nay moi thanh phan la 8 bit co dau.
++    output wire        b4_valid_o,
++    output wire [7:0]  b4_byte_o,
++    // ---- ban sao luong B3 (song mang da tach bin, 4 byte moi song mang) ----
++    output wire        b3_valid_o,
++    output wire [7:0]  b3_byte_o,
++    output wire        b2_valid_o,
++    output wire [7:0]  b2_byte_o,
+     input  wire               clk,
+     input  wire               rst,
+     input  wire        [3:0] fft_win_shift,
+@@ -540,9 +556,58 @@
+         .out_sym_idx(cfo_sym_idx)
+     );
+ 
++    // ======== Chuong 6A: ranh gioi B2 -- CHEN va BAT =======================
++    // Mau da can chinh CFO, thang hang symbol, CON tien to vong -- dung dinh
++    // nghia B2 cua dac ta PHY 3.3.  Chen o day = thay khoi DONG BO.
++    wire                 pl_rot_v;
++    wire signed [15:0]   pl_rot_i, pl_rot_q;
++    wire        ps_b2_sel = ps_ctl[0] & (ps_ctl[6:4] == 3'd2);
++    wire [31:0] b2_mux;
++    wire        b2_v_m;
++    ps_inject #(.W(32), .DEPTH(8192)) u_ps_b2 (
++        .clk(clk), .rst(rst),
++        .en(ps_b2_sel), .ptr_rst(ps_ctl[1]), .go(ps_ctl[2]), .len(ps_ctl[31:16]),
++        .wr_data(ps_ctl[63:32]), .wr_tog(ps_ctl[3]),
++        .pl_data({pl_rot_i, pl_rot_q}), .pl_valid(pl_rot_v),
++        .out_data(b2_mux), .out_valid(b2_v_m), .busy()
++    );
++
++    // BAT: 4 byte moi mau (I cao, I thap, Q cao, Q thap), lay tu duong PL.
++    reg       b2_cv; reg [7:0] b2_cb; reg [1:0] b2_cph;
++    reg [15:0] b2_ci, b2_cq;
++    always @(posedge clk) begin
++        if (rst) begin b2_cv<=1'b0; b2_cph<=2'd0; b2_cb<=8'd0; b2_ci<=16'd0; b2_cq<=16'd0; end
++        else begin
++            b2_cv <= 1'b0;
++            if (pl_rot_v && b2_cph == 2'd0) begin
++                b2_ci <= pl_rot_i; b2_cq <= pl_rot_q;
++                b2_cb <= pl_rot_i[15:8]; b2_cv <= 1'b1; b2_cph <= 2'd1;
++            end else if (b2_cph != 2'd0) begin
++                case (b2_cph)
++                    2'd1: b2_cb <= b2_ci[7:0];
++                    2'd2: b2_cb <= b2_cq[15:8];
++                    default: b2_cb <= b2_cq[7:0];
++                endcase
++                b2_cv  <= 1'b1;
++                b2_cph <= (b2_cph == 2'd3) ? 2'd0 : (b2_cph + 2'd1);
++            end
++        end
++    end
++    assign b2_valid_o = b2_cv;
++    assign b2_byte_o  = b2_cb;
++`ifdef B2_DUMP
++    integer fd_b2; initial fd_b2 = $fopen("b2_pl.hex", "w");
++    always @(posedge clk) if (!rst && pl_rot_v) begin
++        $fwrite(fd_b2, "%04x%04x\n", pl_rot_i, pl_rot_q); $fflush(fd_b2);
++    end
++`endif
++
+     wire                 rot_valid;
+     wire signed [15:0]   rot_i;
+     wire signed [15:0]   rot_q;
++    assign rot_valid = b2_v_m;
++    assign rot_i     = b2_mux[31:16];
++    assign rot_q     = b2_mux[15:0];
+     wire                 rot_sym_start;
+     wire                 rot_sym_done;
+     wire [15:0]          rot_sym_idx;
+@@ -584,9 +649,9 @@
+         .est_valid(est_valid),
+         .corr_re(corr_re),
+         .corr_im(corr_im),
+-        .out_valid(rot_valid),
+-        .out_i(rot_i),
+-        .out_q(rot_q),
++        .out_valid(pl_rot_v),
++        .out_i(pl_rot_i),
++        .out_q(pl_rot_q),
+         .out_sym_start(rot_sym_start),
+         .out_sym_done(rot_sym_done),
+         .out_sym_idx(rot_sym_idx)
+@@ -661,9 +726,35 @@
+     wire pilot_valid;
+     wire [3:0] pilot_no;
+     wire signed [15:0] pilot_i, pilot_q;
++    // ======== Chuong 6A: ranh gioi B3 -- CHEN ==============================
++    // Song mang da tach bin di vao xu ly kenh.  Chen o day = thay khoi
++    // FFT/TACH BIN bang phan mem.  W=32 = {I,Q} moi thanh phan 16 bit.
++    wire               pl_data_v;
++    wire signed [15:0] pl_data_i, pl_data_q;
++    wire        ps_b3_sel = ps_ctl[0] & (ps_ctl[6:4] == 3'd3);
++    wire [31:0] b3_mux;
++    wire        b3_v_m;
++    ps_inject #(.W(32), .DEPTH(8192)) u_ps_b3 (
++        .clk(clk), .rst(rst),
++        .en(ps_b3_sel), .ptr_rst(ps_ctl[1]), .go(ps_ctl[2]), .len(ps_ctl[31:16]),
++        .wr_data(ps_ctl[63:32]), .wr_tog(ps_ctl[3]),
++        .pl_data({pl_data_i, pl_data_q}), .pl_valid(pl_data_v),
++        .out_data(b3_mux), .out_valid(b3_v_m), .busy()
++    );
+     wire data_valid;
+     wire [9:0] data_no;
+     wire signed [15:0] data_i, data_q;
++    assign data_valid = b3_v_m;
++    assign data_i     = b3_mux[31:16];
++    assign data_q     = b3_mux[15:0];
++    // ★ CHUA DU DE CHEN O B3.  Ngoai {I,Q}, ranh gioi nay con mang:
++    //     - data_no : chi so song mang (10 bit)
++    //     - pilot_valid / pilot_no / pilot_i / pilot_q : cac song mang dan duong
++    //   Bo chen chi thay {I,Q}, nen hai thu tren van di theo duong PL va khong
++    //   con khop voi luong duoc chen.  Do da xac nhan: byte_phat=6450 (duong ong
++    //   chay du mot khung) nhung tong=6450 (sai toan bo noi dung).
++    //   Muon chen that o B3 thi phai cap ca ba thu do.  Xem rtl/README.md.
++
+     wire bin_sym_done;
+     wire [15:0] bin_frame_sym_id_dbg;
+     assign data_valid_o = data_valid;
+@@ -701,7 +792,7 @@
+         .out_ready(sp_ready & ratio_in_ready & ~cfifo_full),
+ `endif
+         .pilot_valid(pilot_valid), .pilot_no(pilot_no), .pilot_i(pilot_i), .pilot_q(pilot_q),
+-        .data_valid(data_valid), .data_no(data_no), .data_i(data_i), .data_q(data_q),
++        .data_valid(pl_data_v), .data_no(data_no), .data_i(pl_data_i), .data_q(pl_data_q),
+         .sym_done_out(bin_sym_done)
+     );
+ 
+@@ -1101,10 +1192,50 @@
+     // sign-extend the selected 5-bit decision (+-15) back to the 8-bit demapper input.
+     wire signed [4:0] em_sel_i = em_ml_r ? em_di_r : em_ci_r;
+     wire signed [4:0] em_sel_q = em_ml_r ? em_dq_r : em_cq_r;
++    // ★ Nhanh nay (qam_demapper_multi u_demap) KHONG hoat dong khi V39_ACTIVE.
++    //   B4 that cua duong song la dec_* VAO v39ct_mm_decode -- xem o do.
++    //   Da tung dat ps_inject o day va phep do luong bat duoc 0 song mang,
++    //   dung cai bay "va nham nhanh chet".
+     assign sym_i_demod     = {{3{em_sel_i[4]}}, em_sel_i};
+     assign sym_q_demod     = {{3{em_sel_q[4]}}, em_sel_q};
+     assign demap_sym_valid = em_act_r;
+ 
++    // ======== Chuong 6A: BAT tai ranh gioi B3 ==============================
++    // Song mang da tach bin, TRUOC xu ly kenh.  Moi song mang 4 byte:
++    // I[15:8] I[7:0] Q[15:8] Q[7:0].  Dac ta PHY 3.3: B3 la mau phuc 16 bit.
++    reg        b3_v_r; reg [7:0] b3_b_r; reg [1:0] b3_ph;
++    reg [15:0] b3_i_hold, b3_q_hold;
++    always @(posedge clk) begin
++        if (rst) begin
++            b3_v_r <= 1'b0; b3_ph <= 2'd0; b3_b_r <= 8'd0;
++            b3_i_hold <= 16'd0; b3_q_hold <= 16'd0;
++        end else begin
++            b3_v_r <= 1'b0;
++            if (pl_data_v && b3_ph == 2'd0) begin
++                b3_i_hold <= pl_data_i; b3_q_hold <= pl_data_q;
++                b3_b_r <= pl_data_i[15:8]; b3_v_r <= 1'b1; b3_ph <= 2'd1;
++            end else if (b3_ph != 2'd0) begin
++                case (b3_ph)
++                    2'd1: b3_b_r <= b3_i_hold[7:0];
++                    2'd2: b3_b_r <= b3_q_hold[15:8];
++                    default: b3_b_r <= b3_q_hold[7:0];
++                endcase
++                b3_v_r <= 1'b1;
++                b3_ph  <= (b3_ph == 2'd3) ? 2'd0 : (b3_ph + 2'd1);
++            end
++        end
++    end
++    assign b3_valid_o = b3_v_r;
++    assign b3_byte_o  = b3_b_r;
++`ifdef B3_DUMP
++    integer fd_b3; initial fd_b3 = $fopen("b3_pl.hex", "w");
++    always @(posedge clk) if (!rst && pl_data_v) begin
++        $fwrite(fd_b3, "%04x%04x\n", pl_data_i, pl_data_q); $fflush(fd_b3);
++    end
++`endif
++
++
++
+     // =====================================================================
+     // chEST PHASE B: buffer all-symbol post-FFT Y (data stream, 776-SC data_no order) + the
+     // DFE per-SC decisions (776-SC, refs forced 1,1). Both needed at packet-end for the chEST
+@@ -2888,6 +3019,8 @@
+     // khoa cung bo giai ma vao khung 10 symbol du NUM_OFDM_SYMBOLS khac.
+     v39ct_stream_chest_top #(.NSYM(NUM_OFDM_SYMBOLS), .NCWSYM(RS_CODEWORDS_PER_SYMBOL),
+                             .T(SC_HALF), .NK(SC_NK)) u_v39ct (
++        .b4_valid_o(b4_valid_o), .b4_byte_o(b4_byte_o),
++        .ps_ctl(ps_ctl),
+         .clk(clk), .rst(rst), .n_bpsc(phy_n_bpsc), .n_rsgroup(phy_n_rsgroup),
+ `ifdef RX_ADAPTIVE_MOD
+         .nbpsc_ready(phy_nbpsc_ready),   // hold decode until SIGNAL modulation latched
+@@ -2910,6 +3043,8 @@
+     );
+ `else
+     v39ct_chest_top u_v39ct (
++        .b4_valid_o(b4_valid_o), .b4_byte_o(b4_byte_o),
++        .ps_ctl(ps_ctl),
+         .clk(clk), .rst(rst), .n_bpsc(phy_n_bpsc), .n_rsgroup(phy_n_rsgroup),
+         .feed_valid(vh_pay_r), .feed_yi(vh_yi_r), .feed_yq(vh_yq_r),
+         `ifdef V39_COMPLEX_HBASE
+@@ -8356,6 +8491,14 @@
+     parameter integer N   = 255, parameter integer NCW = 3, parameter integer K = 215,
+     parameter integer GRP = NCW*N               // 765 coded bytes per group
+ )(
++    // ---- Chuong 6A: bus dieu khien span (mot span hoat dong moi luc) ----
++    //   [0] en   [1] ptr_rst   [2] go   [3] wr_tog
++    //   [6:4]   bnd      ranh gioi VAO (noi chen).  5 = B5.
++    //   [31:16] len      so phan tu can phat
++    //   [63:32] wr_data  du lieu ghi (bien byte dung [39:32])
++    input  wire [63:0] ps_ctl,
++    output wire        b4_valid_o,     // ban sao luong B4 cho PS doc
++    output wire [7:0]  b4_byte_o,
+     input  wire              clk,
+     input  wire              rst,
+     input  wire [3:0]        n_bpsc,             // 8/6/4/2/1
+@@ -8400,7 +8543,7 @@
+     // ---------------- demapper + deserializer ----------------
+     wire        dm_bv;  wire [7:0] dm_bits;  wire dm_serr;
+     v39ct_qam_demapper_multi u_dm (.clk(clk), .rst(rst), .n_bpsc(n_bpsc),
+-        .sym_valid(dec_valid), .sym_i(dec_i), .sym_q(dec_q),
++        .sym_valid(b4_v_m), .sym_i(b4_i_m), .sym_q(b4_q_m),
+         .bits_valid(dm_bv), .bits(dm_bits), .nbits(), .sym_error(dm_serr));
+ 
+     wire        ds_ov;  wire [7:0] ds_byte;
+@@ -8440,8 +8583,61 @@
+     reg        rs_iv, rs_ss;   reg [7:0] rs_byte;
+     wire       rs_ir, rs_ov, rs_done;   wire [7:0] rs_ob;  wire [1:0] rs_ocw;  wire [8:0] rs_op;
+     wire [2:0] rs_isok;
++    // ======== Chuong 6A: ranh gioi B4 -- CHEN va BAT =======================
++    // B4 that cua duong song: quyet dinh PAM tung song mang di vao bo giai dieu
++    // che.  Thay khoi XU LY KENH bang cach chen o day.  W=16 = {I,Q}.
++    wire        ps_b4_sel = ps_ctl[0] & (ps_ctl[6:4] == 3'd4);
++    wire [15:0] b4_mux;
++    wire        b4_v_m;
++    wire signed [7:0] b4_i_m = b4_mux[15:8];
++    wire signed [7:0] b4_q_m = b4_mux[7:0];
++    // ★ DEPTH phai >= so phan tu lon nhat mot khung: 10 nhom x 765 = 7650 song
++    //   mang.  Dat 4096 thi con tro ghi CUON VONG va de len phan dau -- phep do
++    //   cho 5 nhom dau sai, 5 nhom cuoi dung, khong mot canh bao nao.
++    ps_inject #(.W(16), .DEPTH(8192)) u_ps_b4 (
++        .clk(clk), .rst(rst),
++        .en(ps_b4_sel), .ptr_rst(ps_ctl[1]), .go(ps_ctl[2]), .len(ps_ctl[31:16]),
++        .wr_data(ps_ctl[47:32]), .wr_tog(ps_ctl[3]),
++        .pl_data({dec_i, dec_q}), .pl_valid(dec_valid),
++        .out_data(b4_mux), .out_valid(b4_v_m), .busy()
++    );
++
++    // BAT: hai byte moi song mang, I roi Q, lay tu duong PL.
++    reg       b4_cv; reg [7:0] b4_cb; reg b4_cph; reg [7:0] b4_cq;
++    always @(posedge clk) begin
++        if (rst) begin b4_cv <= 1'b0; b4_cph <= 1'b0; b4_cb <= 8'd0; b4_cq <= 8'd0; end
++        else begin
++            b4_cv <= 1'b0;
++            if (dec_valid && !b4_cph) begin
++                b4_cb <= dec_i; b4_cq <= dec_q; b4_cv <= 1'b1; b4_cph <= 1'b1;
++            end else if (b4_cph) begin
++                b4_cb <= b4_cq; b4_cv <= 1'b1; b4_cph <= 1'b0;
++            end
++        end
++    end
++    assign b4_valid_o = b4_cv;
++    assign b4_byte_o  = b4_cb;
++`ifdef B4_DUMP
++    integer fd_b4; initial fd_b4 = $fopen("b4_pl.hex", "w");
++    always @(posedge clk) if (!rst && dec_valid) begin
++        $fwrite(fd_b4, "%02x%02x\n", dec_i[7:0], dec_q[7:0]); $fflush(fd_b4);
++    end
++`endif
++
++    // ======== Chuong 6A: diem chen cua span (B4,B5) ========================
++    wire       ps_b5_sel = ps_ctl[0] & (ps_ctl[6:4] == 3'd5);
++    wire       rs_iv_m;
++    wire [7:0] rs_byte_m;
++    ps_inject #(.W(8), .DEPTH(8192)) u_ps_b5 (
++        .clk(clk), .rst(rst),
++        .en(ps_b5_sel), .ptr_rst(ps_ctl[1]), .go(ps_ctl[2]), .len(ps_ctl[31:16]),
++        .wr_data(ps_ctl[39:32]), .wr_tog(ps_ctl[3]),
++        .pl_data(rs_byte), .pl_valid(rs_iv),
++        .out_data(rs_byte_m), .out_valid(rs_iv_m), .busy()
++    );
++
+     v39ct_rs_decode_3cw_db #(.NCW(NCW), .N(N), .K(K)) u_rs (
+-        .clk(clk), .rst(rst), .in_valid(rs_iv), .in_byte(rs_byte), .in_ready(rs_ir),
++        .clk(clk), .rst(rst), .in_valid(rs_iv_m), .in_byte(rs_byte_m), .in_ready(rs_ir),
+         .sym_start(rs_ss), .out_valid(rs_ov), .out_byte(rs_ob), .out_cw(rs_ocw),
+         .out_pos(rs_op), .isOK(rs_isok), .cw_skip(cw_skip), .done(rs_done));
+     // 2026-09-06: voi NCW=1 loi RS khong lai out_cw (chi co mot tu ma), de nguyen
+@@ -9693,6 +9889,14 @@
+     parameter integer KW     = 10,               // dn width
+     parameter integer MAXFAIL= 8
+ )(
++    // ---- Chuong 6A: bus dieu khien span (mot span hoat dong moi luc) ----
++    //   [0] en   [1] ptr_rst   [2] go   [3] wr_tog
++    //   [6:4]   bnd      ranh gioi VAO (noi chen).  5 = B5.
++    //   [31:16] len      so phan tu can phat
++    //   [63:32] wr_data  du lieu ghi (bien byte dung [39:32])
++    input  wire [63:0] ps_ctl,
++    output wire        b4_valid_o,
++    output wire [7:0]  b4_byte_o,
+     input  wire                 clk,
+     input  wire                 rst,
+ 
+@@ -9894,6 +10098,7 @@
+     // decoder u_rmm (a full duplicate RS(255,215) core, ~10k LUT) is removed. The two
+     // phases never overlap (rescue runs strictly after main decode) -> time-shared, bit-exact.
+     v39ct_mm_decode #(.NGROUP_MAX(NSYM)) u_mm (
++        .ps_ctl(ps_ctl),
+         .clk(clk), .rst(rst), .n_bpsc(n_bpsc),
+         .n_rsgroup(in_chest_phase ? 5'd1     : n_rsgroup),
+         .start(    in_chest_phase ? rmm_start : mm_start),
+@@ -10294,6 +10499,14 @@
+     //     approximation (~4% error, no DSP) -- provided as a fallback, not the target.
+     parameter integer TRK_MAG_ONLY = 0
+ )(
++    // ---- Chuong 6A: bus dieu khien span (mot span hoat dong moi luc) ----
++    //   [0] en   [1] ptr_rst   [2] go   [3] wr_tog
++    //   [6:4]   bnd      ranh gioi VAO (noi chen).  5 = B5.
++    //   [31:16] len      so phan tu can phat
++    //   [63:32] wr_data  du lieu ghi (bien byte dung [39:32])
++    input  wire [63:0] ps_ctl,
++    output wire        b4_valid_o,
++    output wire [7:0]  b4_byte_o,
+     input  wire                 clk,
+     input  wire                 rst,
+ 
+@@ -11081,6 +11294,7 @@
+     end
+     wire [2:0] mm_cw_skip = in_chest_phase ? cwok_o[cur_resc_sym[3:0]*3 +: 3] : 3'b000;
+     v39ct_mm_decode #(.NGROUP_MAX(NSYM), .NCW(NCWSYM)) u_mm (
++        .ps_ctl(ps_ctl),
+         .clk(clk), .rst(rst), .n_bpsc(n_bpsc),
+         .n_rsgroup(in_chest_phase ? 5'd1     : n_rsgroup),
+         .start(    in_chest_phase ? rmm_start : mm_start),

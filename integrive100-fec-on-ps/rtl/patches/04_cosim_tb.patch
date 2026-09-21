@@ -1,0 +1,54 @@
+--- tools_cosim/tb_adaptive_mod.sv	2026-09-06 11:17:54.373584868 +0900
++++ /tmp/span/tb.sv	2026-09-16 09:38:45.857437094 +0900
+@@ -9,13 +9,51 @@
+ // -> behavioral FFT -> bin_extract -> decode) of openwifi_rx_phy_with_slope_rs, and check
+ // out_byte == py_tx_expected_msg.hex.  V39_ACTIVE define selects V39 vs static decode.
+ module tb_board_cosim;
++
++`ifdef SPAN_REPLAY
++    // ---- Chuong 6A: phat lai luong da do vao ranh gioi SPAN_REPLAY ----
++    localparam int RP_N = `SPAN_NELEM;
++    logic [31:0] rp_mem [0:16383];
++    logic [63:0] ps_ctl_tb = 64'd0;
++    initial begin
++        $readmemh(`SPAN_FILE, rp_mem);
++    end
++`endif
+     reg clk=0; always #5 clk=~clk;      // 100 MHz
++`ifdef SPAN_REPLAY
++    initial begin
++        // doi het reset roi ghi toan bo bo dem, sau do giat `go`
++        ps_ctl_tb = 64'd0;
++        ps_ctl_tb[6:4] = 3'd`SPAN_REPLAY;
++        ps_ctl_tb[0]   = 1'b1;
++        repeat (30) @(negedge clk);
++        ps_ctl_tb[1] = 1'b1; @(negedge clk); ps_ctl_tb[1] = 1'b0;
++        for (int i = 0; i < RP_N; i++) begin
++            @(negedge clk);
++            ps_ctl_tb[63:32] = rp_mem[i];
++            ps_ctl_tb[3]     = ~ps_ctl_tb[3];
++        end
++        @(negedge clk);
++        ps_ctl_tb[31:16] = RP_N[15:0];
++        @(negedge clk); ps_ctl_tb[2] = 1'b1; @(negedge clk); ps_ctl_tb[2] = 1'b0;
++    end
++`endif
+     reg rst=1, in_valid=0; reg signed [15:0] in_i=0, in_q=0; reg force_detect=0;
+     wire        bits_valid_o; wire [7:0] out_byte;
+     wire        raw_bits_valid_o; wire [7:0] raw_out_byte_o;
+     wire        pkt_detect_o, sym_start_o, fft_valid_o, data_valid_o;
+ 
+     openwifi_rx_phy_with_slope_rs #(.SHARED_FFT_MODE(0), .NUM_OFDM_SYMBOLS(`TB_NSYM)) dut (
++`ifdef SPAN_REPLAY
++        .ps_ctl(ps_ctl_tb),
++`elsif SPAN_BND
++        // Bat span tai ranh gioi SPAN_BND ma KHONG bom gi: duong ong phai DUNG
++        // han o do.  Neu van giai ra byte thi diem chen khong nam tren duong
++        // song -- dung phep thu am tinh de tim nhanh chet.
++        .ps_ctl({32'd0, 16'd0, 9'd0, 3'd`SPAN_BND, 1'b0, 2'd0, 1'b1}),
++`else
++        .ps_ctl(64'd0),   // Chuong 6A: span TAT
++`endif
+         .clk(clk), .rst(rst), .fft_win_shift(`WIN_SHIFT), .fft_sat_en(`FFT_SAT), .in_valid(in_valid), .in_i(in_i), .in_q(in_q),
+         .force_detect(force_detect),
+         .frame_in_progress(1'b0),   // SYM10 cosim: inert (last_group_drain port removed in bisect)

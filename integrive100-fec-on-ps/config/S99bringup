@@ -1,0 +1,46 @@
+#!/bin/sh
+# =============================================================================
+#  /etc/init.d/S99bringup -- bring the RX to DECODE-READY at boot.
+#
+#  Runs LAST (S99), after network (S40) and dropbear (S50) are up, so a failed
+#  or slow bring-up never costs you the SSH way in.  It backgrounds the actual
+#  work so boot never blocks on it.
+#
+#  Result after boot: the radio is configured exactly as config/README.md
+#  proved -- ./fec_on_ps 40 shows frames received = 40/40, PER = 0.0000 -- with
+#  no manual step.  Progress is logged to /root/bringup.log (or /tmp if rootfs ro).
+#
+#  Install: see config/AUTOBOOT.md.  Needs config/ copied to /root/config/.
+# =============================================================================
+CFG=/root/config
+LOG=/root/bringup.log
+# rootfs may be mounted read-only (a corrupted ext4 remounts itself ro); then
+# log to tmpfs so the script still runs and still records what happened.
+if ! ( : > "$LOG" ) 2>/dev/null; then LOG=/tmp/bringup.log; fi
+
+start() {
+    (
+        echo "== S99bringup $(date 2>/dev/null) =="
+        # Wait for the AD9361 to enumerate (the SPI probe finishes a moment
+        # after userspace starts).
+        i=0
+        while [ ! -e /sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency ] \
+              && [ $i -lt 40 ]; do
+            usleep 250000; i=$((i+1))
+        done
+        if [ ! -e /sys/bus/iio/devices/iio:device0/in_voltage_sampling_frequency ]; then
+            echo "  AD9361 did not appear -- aborting bring-up"; exit 0
+        fi
+        # The proven bring-up.  Cable defaults (TX -27, RX 31); edit here for
+        # antennas.  bringup.sh runs autoconfig then rf_setup.
+        sh "$CFG/bringup.sh" -27 31
+        echo "== bring-up done; run ./fec_on_ps 40 =="
+    ) >> "$LOG" 2>&1 &
+}
+
+case "$1" in
+    start|"") start ;;
+    stop)     : ;;
+    restart)  start ;;
+    *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

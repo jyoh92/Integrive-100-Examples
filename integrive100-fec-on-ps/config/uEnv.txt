@@ -1,0 +1,15 @@
+kernel_image=uImage
+devicetree_image=devicetree.dtb
+# Which bitstream u-boot loads into the PL, cold, before Linux.  Change ONLY
+# this line to switch builds:
+#   span65.bin   this repo's build: (B5,B6) tap + separate FFT + 65 MHz clock.
+#   span6a.bin   older (B5,B6)-only build, 85 MHz.
+#   nochest.bin  no tap, but hardware-proven 200/200 frames -- for PER/BER only.
+bitstream_image=span65.bin
+# ! Do NOT set init=/root/autostart.sh.  It bypasses /etc/init.d, so network
+#   (S40) and dropbear (S50) never start and there is no way in over SSH.  The
+#   RF bring-up runs from /etc/init.d/S99bringup instead, which keeps them.
+# ! rootflags=commit=1 narrows the ext4 write window from the 5 s default to
+#   1 s, shrinking the data-loss window on a sudden power cut.
+bootargs=console=ttyPS0,115200 root=/dev/mmcblk0p2 rw rootwait rootfstype=ext4 rootflags=commit=1 earlyprintk sdhci.debug_quirks=0x60
+uenvcmd=fatload mmc 0 0x1000000 ${bitstream_image} && fpga load 0 0x1000000 ${filesize} && fatload mmc 0 0x3000000 ${kernel_image} && fatload mmc 0 0x2A00000 ${devicetree_image} && bootm 0x3000000 - 0x2A00000
